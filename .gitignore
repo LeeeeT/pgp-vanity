@@ -1,0 +1,7 @@
+AGENTS.md
+
+/target
+/.amp
+/.tmp-*
+/progress-*.log
+/sample-output.asc

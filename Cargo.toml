@@ -1,0 +1,19 @@
+[package]
+name = "pgp-vanity"
+version = "0.1.0"
+edition = "2024"
+description = "GPU-accelerated CLI for generating vanity OpenPGP keys whose key ID starts with a chosen hex prefix (ROCm HIP or CUDA)"
+repository = "https://github.com/LeeeeT/pgp-vanity"
+license = "0BSD"
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.40", features = ["derive"] }
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["rand_core"] }
+hex = "0.4.3"
+libloading = "0.8.9"
+rand = "0.9.2"
+sequoia-openpgp = { version = "2.2.0", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto"] }
+
+[dev-dependencies]
+tempfile = "3.20.0"
