@@ -2,24 +2,22 @@
 
 `pgp-vanity` is a GPU-accelerated CLI for generating vanity OpenPGP private keys whose primary key ID starts with a chosen hexadecimal prefix.
 
-It uses a GPU search kernel, compiled at runtime for either AMD (HIP via HIPRTC) or NVIDIA (CUDA via NVRTC) GPUs, to scan the 32-bit creation timestamp space for a fixed Ed25519 keypair, then emits a complete ASCII-armored `PGP PRIVATE KEY BLOCK` when it finds a match.
+It uses a GPU search kernel, compiled at runtime for either AMD (HIP via HIPRTC) or NVIDIA (CUDA via NVRTC) GPUs, to scan creation timestamps from the Unix epoch through the search start time for a fixed Ed25519 keypair, then emits a complete ASCII-armored `PGP PRIVATE KEY BLOCK` when it finds a match.
 
 ```console
-$ pgp-vanity --name Alice --email alice@example.com --max-error 2 AAAAAAAAAAAAAAAA
-searching for key ID prefix AAAAAAAAAAAAAAAA (up to 2 wrong hex digit(s))
+$ pgp-vanity --name Alice --email alice@example.com A
+searching for key ID prefix A
 using HIP GPU: AMD Radeon RX 6900 XT
-found matching key ID AAAAEAAAAAAAAAAF
-fingerprint: C12646C6CA7CBD822750D50EAAAAEAAAAAAAAAAF
-timestamp: 1944069932
-seed: 07606D6E2582A1AFE7142D2F001527F1E4829667E7C287800886A886BBA0487C
-public key: 9ACEE20A6AF7B86F22D0DF0EE83D79D00697DF5EC27D9E78626360576FFAAED1
-keys tried: 1189
-timestamps checked: 5104365217581
-elapsed: 248.85s
+found matching key ID AFCAEE0E84A6C6D3
+fingerprint: 8A27FBDC0E108A3CFD4E12F6AFCAEE0E84A6C6D3
+timestamp: 9
+seed: D6421478382F2945805287761E8F1D8B99750E33CFBDEFE8BC3F806C87BC21C0
+public key: 7C22F477F79559902EFBA0CC77E6F6BF4D3BA413280EFE1C2F42265FC49CB1C4
+keys tried: 1
+timestamps checked: 10
+elapsed: 0.00s
 -----BEGIN PGP PRIVATE KEY BLOCK-----
 ```
-
-(ran at 20 GH/s)
 
 ## Compatibility
 
@@ -73,7 +71,7 @@ nix develop
 
 ## Features
 
-- GPU search over the full 32-bit creation timestamp range, on HIP or CUDA
+- GPU search over creation timestamps from the Unix epoch through the search start time, on HIP or CUDA
 - Multiple prefixes searched simultaneously, with optional error tolerance (`--max-error`)
 - Minimal key format that imports cleanly into GnuPG
 - Optional encryption of the result to a recipient's OpenPGP key (`--encrypt-to`)
@@ -138,14 +136,6 @@ Import the generated key into GnuPG:
 gpg --import vanity-private.asc
 ```
 
-The search draws creation timestamps from the entire 32-bit range, so a matching key is often dated in the future. GnuPG refuses to use such a key until its creation time has passed ("key was created N days in the future"), so pass `--faked-system-time` set to the key's creation time (the `timestamp` line on stderr) or later:
-
-```bash
-gpg --faked-system-time 1944069932! --import vanity-private.asc
-```
-
-The trailing `!` freezes the clock at that instant instead of letting it keep ticking. Any later operation that uses the key (signing, certifying) needs the same option; add `faked-system-time` to `gpg.conf` to apply it permanently.
-
 Encrypt the result to your own OpenPGP key so the private material never appears as plaintext on disk or the terminal:
 
 ```bash
@@ -179,7 +169,7 @@ SHA1(0x99 || uint16_be(len(public_key_packet_body)) || public_key_packet_body)
 
 The key ID is the low 64 bits of that fingerprint.
 
-For each keypair, `pgp-vanity` keeps the Ed25519 secret/public key fixed and varies the 32-bit creation timestamp on the GPU. That is much cheaper than regenerating a brand-new keypair for every attempt, and the timestamp still affects the fingerprint and key ID.
+For each keypair, `pgp-vanity` keeps the Ed25519 secret/public key fixed and varies the creation timestamp on the GPU from zero through the Unix time captured when the search starts. That is much cheaper than regenerating a brand-new keypair for every attempt, the timestamp still affects the fingerprint and key ID, and generated keys are never future-dated.
 
 ## Output Format
 

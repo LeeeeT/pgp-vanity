@@ -1,7 +1,7 @@
 use std::io::{self, Write};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use ed25519_dalek::SigningKey;
 use rand::TryRngCore;
 use rand::rngs::OsRng;
@@ -11,7 +11,6 @@ use crate::gpu::GpuSearchEngine;
 use crate::{HexPrefixSet, hex_upper, key_id_hex};
 
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
-const TIMESTAMP_SPACE: u64 = u32::MAX as u64 + 1;
 
 #[derive(Clone, Debug)]
 pub struct SearchConfig {
@@ -66,6 +65,7 @@ pub fn search(config: SearchConfig) -> Result<SearchResult> {
 
     engine.prepare_prefixes(&config.prefixes)?;
     let prefix_display = format_prefix_list(&config.prefixes);
+    let timestamp_count = timestamp_count_through(SystemTime::now())?;
 
     let overall_start = Instant::now();
     let mut total_checked = 0u64;
@@ -100,8 +100,8 @@ pub fn search(config: SearchConfig) -> Result<SearchResult> {
         let mut batch_start = 0u64;
         let mut progress_shown_this_attempt = false;
 
-        while batch_start < TIMESTAMP_SPACE {
-            let batch_count = engine.batch_size().min(TIMESTAMP_SPACE - batch_start) as u32;
+        while batch_start < timestamp_count {
+            let batch_count = engine.batch_size().min(timestamp_count - batch_start) as u32;
             let found_timestamp = engine.search_batch(batch_start as u32, batch_count)?;
 
             let checked_in_batch = match found_timestamp {
@@ -182,7 +182,7 @@ pub fn search(config: SearchConfig) -> Result<SearchResult> {
                 clear_progress_line(progress_line_len);
             }
             bail!(
-                "searched all {TIMESTAMP_SPACE} timestamps for the provided seed without finding prefix {prefix_display}"
+                "searched all {timestamp_count} non-future timestamps for the provided seed without finding prefix {prefix_display}"
             );
         }
     }
@@ -198,6 +198,15 @@ fn random_seed() -> Result<[u8; 32]> {
         .try_fill_bytes(&mut seed)
         .map_err(|error| anyhow::anyhow!("failed to read secure randomness: {error}"))?;
     Ok(seed)
+}
+
+fn timestamp_count_through(now: SystemTime) -> Result<u64> {
+    let current_timestamp = now
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_secs()
+        .min(u64::from(u32::MAX));
+    Ok(current_timestamp + 1)
 }
 
 fn render_progress_line(line: &str, progress_line_len: &mut usize) {
@@ -277,5 +286,26 @@ fn format_percentage(value: f64) -> String {
         format!("{value:.4}")
     } else {
         format!("{value:.6}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use super::timestamp_count_through;
+
+    #[test]
+    fn timestamp_count_includes_now_but_not_the_future() {
+        assert_eq!(timestamp_count_through(UNIX_EPOCH).unwrap(), 1);
+        assert_eq!(
+            timestamp_count_through(UNIX_EPOCH + Duration::from_secs(42)).unwrap(),
+            43
+        );
+        assert_eq!(
+            timestamp_count_through(UNIX_EPOCH + Duration::from_secs(u64::from(u32::MAX) + 1))
+                .unwrap(),
+            u64::from(u32::MAX) + 1
+        );
     }
 }
