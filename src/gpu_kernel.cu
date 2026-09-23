@@ -22,7 +22,15 @@ __device__ inline __attribute__((always_inline)) unsigned int sha1_ch(
     unsigned int y,
     unsigned int z)
 {
+#if defined(__AMDGCN__)
+    unsigned int result;
+    // LLVM otherwise lowers choose to two instructions (xor + and-or).
+    asm("v_bfi_b32 %0, %1, %2, %3"
+        : "=v"(result) : "v"(x), "v"(y), "v"(z));
+    return result;
+#else
     return z ^ (x & (y ^ z));
+#endif
 }
 
 __device__ inline __attribute__((always_inline)) unsigned int sha1_parity(
@@ -38,7 +46,15 @@ __device__ inline __attribute__((always_inline)) unsigned int sha1_maj(
     unsigned int y,
     unsigned int z)
 {
+#if defined(__AMDGCN__)
+    unsigned int result;
+    // If x == z, choose z; otherwise choose y: xor + bit-select.
+    asm("v_bfi_b32 %0, %1, %2, %3"
+        : "=v"(result) : "v"(x ^ z), "v"(y), "v"(z));
+    return result;
+#else
     return (x & y) | (z & (x ^ y));
+#endif
 }
 
 __device__ inline __attribute__((always_inline)) unsigned int load_best_timestamp(

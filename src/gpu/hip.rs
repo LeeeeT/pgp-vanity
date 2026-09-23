@@ -27,7 +27,7 @@ const WAVE64_CANDIDATES: [bool; 1] = [false];
 // CU mode adds a 6th tuning dimension with marginal headroom on RDNA2; the
 // extra variants more than double tuning time. Skip for now.
 const CU_MODE_CANDIDATES: [bool; 1] = [false];
-const TUNING_CACHE_VERSION: u32 = 9;
+const TUNING_CACHE_VERSION: u32 = 10;
 const TUNING_CACHE_FILE: &str = "hip-tuning.txt";
 
 type HipError = c_int;

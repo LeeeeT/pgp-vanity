@@ -169,3 +169,162 @@ fn round_up_u32(value: u32, multiple: u32) -> u32 {
         value + (multiple - remainder)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::{BATCH_ITERATIONS, GpuSearchEngine};
+    use crate::HexPrefixSet;
+    use crate::fingerprint::{FingerprintSearch, key_id_from_fingerprint};
+
+    fn available_engine() -> Result<Option<GpuSearchEngine>> {
+        match GpuSearchEngine::new() {
+            Ok(engine) => Ok(Some(engine)),
+            // An explicitly selected backend must work, including compilation:
+            // do not hide a kernel regression behind the no-GPU skip.
+            Err(error) if std::env::var_os("PGP_VANITY_GPU_BACKEND").is_some() => Err(error),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn key_id(search: &FingerprintSearch, timestamp: u32) -> u64 {
+        key_id_from_fingerprint(&search.fingerprint(timestamp))
+    }
+
+    fn cpu_match(
+        search: &FingerprintSearch,
+        prefixes: &HexPrefixSet,
+        start: u32,
+        count: u32,
+    ) -> Option<u32> {
+        (u64::from(start)..u64::from(start) + u64::from(count))
+            .map(|timestamp| u32::try_from(timestamp).expect("timestamp range must not wrap"))
+            .find(|&timestamp| prefixes.matches(key_id(search, timestamp)))
+    }
+
+    #[test]
+    fn gpu_partial_tails_match_cpu_fingerprints() -> Result<()> {
+        let Some(mut engine) = available_engine()? else {
+            return Ok(());
+        };
+        let varied_key = std::array::from_fn(|index| (index as u8).wrapping_mul(37));
+        for (public_key, start, count) in [
+            ([0; 32], 0, 0u32),
+            ([0; 32], 0, 1),
+            (varied_key, 0x1357_9BDF, 33),
+            ([0x42; 32], 0x7FFF_FFF0, 65),
+            ([0xFF; 32], u32::MAX - 64, 64),
+        ] {
+            let search = FingerprintSearch::new(public_key);
+            engine.prepare_search(&search.base_words())?;
+            // The last in-range candidate must be visited; the next candidate
+            // must not be visited by padded lanes or an unguarded tail.
+            for offset in [count.saturating_sub(1), count] {
+                let prefixes =
+                    HexPrefixSet::parse([format!("{:016X}", key_id(&search, start + offset))])?;
+                engine.prepare_prefixes(&prefixes)?;
+                assert_eq!(
+                    engine.search_batch(start, count)?,
+                    cpu_match(&search, &prefixes, start, count),
+                    "start={start:#010X}, count={count}, target offset={offset}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gpu_prefix_modes_and_earliest_match_agree_with_cpu() -> Result<()> {
+        let Some(mut engine) = available_engine()? else {
+            return Ok(());
+        };
+        let search = FingerprintSearch::new([0xA5; 32]);
+        let start = 0xDEAD_BEEF;
+        let count = 257;
+        engine.prepare_search(&search.base_words())?;
+        let early = key_id(&search, start + 31);
+        let late = key_id(&search, start + 129);
+        // Change multiple bits in one nibble in each half of the key ID:
+        // max-error counts hex digits, not bits, across both SHA-1 words.
+        let two_errors = early ^ 0xF000_0000_0000_000F;
+        let exact = format!("{early:016X}");
+        let cases = [
+            HexPrefixSet::parse([exact.as_str()])?,
+            HexPrefixSet::parse([format!("{late:016X}"), exact.clone()])?,
+            HexPrefixSet::parse([&exact[..9]])?,
+            HexPrefixSet::parse([format!("{two_errors:016X}")])?.with_max_error(1),
+            HexPrefixSet::parse([format!("{two_errors:016X}")])?.with_max_error(2),
+            HexPrefixSet::parse([format!("{late:016X}"), format!("{two_errors:016X}")])?
+                .with_max_error(2),
+        ];
+        for prefixes in cases {
+            engine.prepare_prefixes(&prefixes)?;
+            assert_eq!(
+                engine.search_batch(start, count)?,
+                cpu_match(&search, &prefixes, start, count),
+                "prefixes={:?}, max_error={}",
+                prefixes.normalized_list(),
+                prefixes.max_error()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gpu_poll_groups_and_full_batches_find_cpu_derived_matches() -> Result<()> {
+        let Some(mut engine) = available_engine()? else {
+            return Ok(());
+        };
+        let search = FingerprintSearch::new([0x3C; 32]);
+        engine.prepare_search(&search.base_words())?;
+        let batch_count = u32::try_from(engine.batch_size())?;
+        // Batch size is capped at u32::MAX; round up to recover the stride
+        // even for the largest launch geometry.
+        let stride = engine.batch_size().div_ceil(BATCH_ITERATIONS) as u32;
+        let start = 0;
+        // Exercise each guarded candidate and entry into the next poll group.
+        // Exact 64-bit CPU-derived key IDs plant hits without a CPU scan of
+        // millions of timestamps or a full-space no-match GPU search.
+        for offset in [stride, 2 * stride + 1, 3 * stride + 2, 4 * stride + 3] {
+            let prefixes = HexPrefixSet::parse([format!("{:016X}", key_id(&search, offset))])?;
+            engine.prepare_prefixes(&prefixes)?;
+            assert_eq!(engine.search_batch(start, offset)?, None, "offset={offset}");
+            assert_eq!(
+                engine.search_batch(start, offset + 1)?,
+                Some(offset),
+                "offset={offset}"
+            );
+        }
+
+        // End just before the reserved not-found timestamp, exercising high
+        // timestamp arithmetic in the full-batch specialization as well.
+        let start = u32::MAX - batch_count;
+        let early = start + 4 * stride - 1;
+        let late = start + 4 * stride + 17;
+        let early_id = key_id(&search, early);
+        let late_id = key_id(&search, late);
+        for (prefixes, expected) in [
+            (HexPrefixSet::parse([format!("{late_id:016X}")])?, late),
+            (
+                HexPrefixSet::parse([format!("{late_id:016X}"), format!("{early_id:016X}")])?,
+                early,
+            ),
+            (
+                HexPrefixSet::parse([format!("{:016X}", early_id ^ 0xF000_0000_0000_000F)])?
+                    .with_max_error(2),
+                early,
+            ),
+        ] {
+            engine.prepare_prefixes(&prefixes)?;
+            assert_eq!(
+                engine.search_batch(start, batch_count)?,
+                Some(expected),
+                "full batch, prefixes={:?}, max_error={}",
+                prefixes.normalized_list(),
+                prefixes.max_error()
+            );
+        }
+        Ok(())
+    }
+}
